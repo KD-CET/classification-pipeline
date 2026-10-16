@@ -16,7 +16,7 @@ from pipeline_common import (
     REJECT_TAU
 )
 
-BANDWIDTH = 0.05
+BANDWIDTH = 0.03
 DISPLAY_N = 160
 
 X = load_split_scaled()["train"]  # surface is built from training data

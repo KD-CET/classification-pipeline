@@ -8,6 +8,7 @@ import numpy as np
 from pipeline_common import (
     load_split_scaled,
     scale_features,
+    to_features,
     quantize,
     dequantize,
     GRID_N,
@@ -32,8 +33,9 @@ tables = {
 def classify(raw_point):
     """Class label for a RAW point, or None for "unknown"."""
 
+    uv, ir = raw_point  # raw sensor units
     point, _ = scale_features(
-        np.asarray(raw_point),
+        to_features([uv], [ir])[0],  # (UV, log10(1+IR))
         bounds
     )
 
@@ -71,11 +73,12 @@ def classify(raw_point):
 
 
 if __name__ == "__main__":
-    # One raw point on each shape, then the ring's hollow centre (unknown).
+    # One typical (UV, IR) reading per lighting class, then an unseen one.
     for q in (
-        [0.0, -1.8],
-        [0.0, 5.0],
-        [6.8, 1.6],
-        [4.8, 1.6]
+        [0, 140],        # shade
+        [0, 226],        # LED
+        [0, 381],        # fluorescent
+        [3500, 28600],   # sun
+        [0, 3000]        # bright IR, no UV: never trained -> unknown
     ):
         print(q, "->", classify(q))

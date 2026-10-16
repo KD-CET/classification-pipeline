@@ -11,7 +11,7 @@ from pipeline_common import load_split_scaled, VIEW_LIM
 
 X = load_split_scaled()["train"]       # clustering sees TRAINING data only
 
-db = DBSCAN(eps=0.06, min_samples=8)   # eps is meaningless unscaled
+db = DBSCAN(eps=0.03, min_samples=10)   # eps is meaningless unscaled
 labels = db.fit_predict(X)             # -1 = noise
 
 classes = sorted(set(labels) - {-1})

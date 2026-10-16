@@ -1,0 +1,5 @@
+true label,0,1,2,3
+LED,0,0,0,345
+fluorescent,0,0,345,0
+shade,0,345,0,0
+sun,345,0,0,0
