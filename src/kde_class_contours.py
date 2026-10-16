@@ -14,7 +14,7 @@ from pipeline_common import (
     VIEW_LIM
 )
 
-BANDWIDTH = 0.05
+BANDWIDTH = 0.03
 DISPLAY_N = 200  # fine grid used only for the figure, not for storage
 
 X = load_split_scaled()["train"]  # KDE is fit on TRAINING data only

@@ -10,6 +10,7 @@ import numpy as np
 from pipeline_common import (
     load_split_scaled,
     scale_features,
+    to_features,
     cell_of,
     quantize,
     dequantize,
@@ -29,9 +30,10 @@ tables = {c: quantize(surfaces[f"c{c}"]) for c in classes}
 
 
 # The query is a genuine HELD-OUT test point, not a hand-picked one:
-# among the test points confidently classified and away from the plot
-# edges (so the marker is visible), take the one the stored model claims
-# most strongly. The figure then shows a real unseen point being classified.
+# among the test points confidently classified, take the one the stored
+# model claims most strongly. (The Lab 03 "away from the edges" filter is
+# dropped: on real data every class sits on a grid edge -- indoor UV is 0,
+# sun is near the top of both ranges.)
 def _win_value(p):
     return max(
         dequantize(tables[k][cell_of(p)])
@@ -42,14 +44,13 @@ def _win_value(p):
 _interior = [
     i for i, p in enumerate(Xtest)
     if _win_value(p) >= REJECT_TAU
-    and all(2 <= v <= GRID_N - 3 for v in cell_of(p))
 ]
 
 QUERY = Xtest[max(_interior, key=lambda i: _win_value(Xtest[i]))]
 
-QUERY_RAW = (
-    QUERY * (bounds[1] - bounds[0]) + bounds[0]
-)
+# Back to sensor units: undo the scaling, then undo the log on IR.
+_feat = QUERY * (bounds[1] - bounds[0]) + bounds[0]
+QUERY_RAW = np.array([_feat[0], 10 ** _feat[1] - 1]).round(1)   # (UV, IR)
 
 
 def lookup_nearest(point):
@@ -161,21 +162,19 @@ print(
 )
 
 
-# The hollow centre of the ring: surrounded by data, yet no class was ever
-# trained there. An honest classifier must answer "unknown", not guess.
-RING_CENTRE_RAW = np.array([4.8, 1.6])
-
-ring_centre, _ = scale_features(
-    RING_CENTRE_RAW,
-    bounds
-)
-
-label, _ = classify(lookup_nearest(ring_centre))
-
-print(
-    f"ring centre {RING_CENTRE_RAW} -> "
-    f"{'unknown' if label is None else f'class {label}'}"
-)
+# Lighting the model was never trained on. Like Lab 03's ring centre, an
+# honest classifier must answer "unknown" here, not guess the nearest class.
+#   (UV, IR) in raw sensor units
+UNSEEN_RAW = {
+    "between LED and fluorescent": (0, 300),
+    "bright indoor IR, no UV (e.g. halogen)": (0, 3000),
+    "UV but little IR (e.g. UV lamp)": (2000, 400),
+}
+for name, (uv, ir) in UNSEEN_RAW.items():
+    q, _ = scale_features(to_features([uv], [ir])[0], bounds)
+    label, _ = classify(lookup_nearest(q))
+    print(f"unseen {name:40s} UV={uv:<5} IR={ir:<5} -> "
+          f"{'unknown' if label is None else f'class {label}'}")
 
 
 # -- Figure: the one test query, the grid, and the class probabilities. --

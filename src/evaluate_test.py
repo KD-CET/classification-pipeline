@@ -23,7 +23,7 @@ from pipeline_common import (
     REJECT_TAU
 )
 
-BANDWIDTH = 0.05  # frozen: validation-selected
+BANDWIDTH = 0.03  # frozen: validation-selected
 
 data = load_split_scaled()
 Xtr, Xte = data["train"], data["test"]
