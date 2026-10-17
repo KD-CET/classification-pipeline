@@ -3,17 +3,20 @@
 // Algorithm 1: read -> same EMA filter as collection -> features -> scale with
 // SCALE_BOUNDS -> grid cell -> one pgm_read_byte per class -> argmax -> reject.
 //
-// Every sample prints one CSV row (lines starting with '#' are comments):
-//   rawUV,rawIR,uvF,irF,label,pred,score
-// raw*  = unfiltered readings     (Part 5 raw-vs-filtered plot)
-// *F    = EMA-filtered readings   (what the classifier sees)
-// label = what you said the lighting is (for the held-out batch), "-" if none
-// pred  = CLASS_NAMES[c] or UNKNOWN, score = winning table value (0-1)
+// WHAT YOU SEE IN THE SERIAL MONITOR (115200 baud, "Newline")
+//   One line per sample (~8-10 per second), every value labelled:
+//   UV raw    0  filt     0.00 | IR raw   227  filt   226.80 | label: LED         | detected: LED          conf 100.0%  <- correct
+//     UV raw / filt : UV sensor, unfiltered and EMA-filtered (0-4095)
+//     IR raw / filt : TSL2591 IR channel, unfiltered and EMA-filtered (0-65535)
+//     label         : what you said the light is (L:<name>), "-" if not recording
+//     detected      : what the model decided (or UNKNOWN), conf = winning score
+//   Lines starting with '#' are status messages. The Python scripts read the
+//   value lines directly, so you can save the whole Serial Monitor as-is.
 //
-// Serial commands (115200 baud, newline):
-//   L:sun   tag the following rows as "sun" (also resets the filter)
-//   L:      stop tagging (label = "-")
-//   B       benchmark: average time per lookup over 1000 lookups
+// COMMANDS (type in the box at the top, press Enter)
+//   L:LED   start recording, tagged "LED" (also resets the filter)
+//   L:      stop recording
+//   B       benchmark: time per lookup
 //
 // Flash/SRAM measurement: compile once with INCLUDE_MODEL 1 and once with
 // INCLUDE_MODEL 0, and subtract the "Sketch uses" / "Global variables use"
@@ -42,8 +45,10 @@ const unsigned long SAMPLE_INTERVAL_MS = 100;   // ~10 Hz target; TSL integratio
 
 float uvFiltered = -1;   // -1 = not initialised
 float irFiltered = -1;
-String currentLabel = "-";
+String currentLabel = "";              // empty = not recording
 unsigned long lastSampleTime = 0;
+unsigned long recRows = 0;             // rows recorded for the current label
+unsigned long recMatches = 0;          // ...where the model agreed with the label
 
 volatile int sink;       // stops the compiler optimising the benchmark away
 
@@ -102,11 +107,32 @@ void readSensors(int &rawUV, int &rawIR) {
   uint32_t lum = tsl.getFullLuminosity();   // ir << 16 | full
   rawIR = lum >> 16;
   if ((lum & 0xFFFF) == 0xFFFF || rawIR == 0xFFFF) {
-    Serial.println("# WARNING: TSL2591 saturated");
+    Serial.println("# WARNING: light sensor saturated (too bright)");
   }
 }
 
 void resetFilter() { uvFiltered = irFiltered = -1; }
+
+// ---------------------------------------------------------------- recording
+void printRecordingSummary() {
+  if (recRows == 0) return;
+  Serial.printf("# ---- Stopped \"%s\": %lu rows, model said %s on %lu of them (%.0f%%)\n",
+                currentLabel.c_str(), recRows, currentLabel.c_str(), recMatches,
+                100.0f * recMatches / recRows);
+}
+
+void startRecording(const String &label) {
+  if (currentLabel.length()) printRecordingSummary();
+  currentLabel = label;
+  recRows = recMatches = 0;
+  resetFilter();   // the EMA must not carry the previous condition into this one
+  if (currentLabel.length()) {
+    Serial.printf("# ---- Recording \"%s\" (filter reset). Type L: to stop.\n",
+                  currentLabel.c_str());
+  } else {
+    Serial.println("# ---- Not recording (label shows \"-\").");
+  }
+}
 
 // ---------------------------------------------------------------- benchmark
 void runBenchmark() {
@@ -121,7 +147,7 @@ void runBenchmark() {
   }
   unsigned long lookupUs = micros() - t0;
 
-  // full sample for comparison: ADC + I2C read + filter + lookup
+  // full sample for comparison: ADC + I2C read + lookup
   const int M = 20;
   int rUV, rIR;
   t0 = micros();
@@ -131,6 +157,7 @@ void runBenchmark() {
   }
   unsigned long fullUs = micros() - t0;
 
+  Serial.println("# ---- Benchmark ----");
   Serial.printf("# BENCH lookup: %.2f us/query (%d queries, total %lu us)\n",
                 lookupUs / (float)N, N, lookupUs);
   Serial.printf("# BENCH full sample (ADC + TSL2591 + lookup): %.1f ms\n",
@@ -143,35 +170,39 @@ void handleSerialCommands() {
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n');
   line.trim();
-  if (line.startsWith("L:")) {
+  if (line.startsWith("L:") || line.startsWith("l:")) {
     String lab = line.substring(2);
     lab.trim();
-    currentLabel = lab.length() ? lab : "-";
-    resetFilter();   // the EMA must not carry the previous condition into this one
-    Serial.print("# label = ");
-    Serial.println(currentLabel);
-  } else if (line == "B") {
+    startRecording(lab);
+  } else if (line == "B" || line == "b") {
     runBenchmark();
+  } else if (line.length()) {
+    Serial.println("# Commands: L:<label> start recording | L: stop | B benchmark");
   }
 }
 
 // ---------------------------------------------------------------- main
 void setup() {
   Serial.begin(115200);
+  delay(300);
   analogReadResolution(12);
   analogSetPinAttenuation(UV_PIN, ADC_11db);   // full 0-3.3 V range
   Wire.begin(SDA_PIN, SCL_PIN);
   if (!tsl.begin()) {
-    Serial.println("# ERROR: TSL2591 not found (SDA=21, SCL=22)");
+    Serial.println("# ERROR: TSL2591 not found. Check SDA=21, SCL=22, VIN=3V3, GND.");
     while (1) delay(1000);
   }
   configureTSL2591();
+
+  Serial.println("#");
+  Serial.println("# ===== Lighting classifier (ESP32) =====");
 #if INCLUDE_MODEL
-  Serial.printf("# model: %d classes, %dx%d grid, table %u B, tau %.2f\n",
-                NUM_CLASSES, GRID_N, GRID_N, (unsigned)sizeof(CLASS_TABLE), REJECT_TAU);
+  Serial.printf("# Model: %d classes, %dx%d grid, %u-byte table, UNKNOWN below %.0f%%\n",
+                NUM_CLASSES, GRID_N, GRID_N, (unsigned)sizeof(CLASS_TABLE), REJECT_TAU * 100);
 #endif
-  Serial.printf("# free heap at boot: %u B\n", ESP.getFreeHeap());
-  Serial.println("rawUV,rawIR,uvF,irF,label,pred,score");
+  Serial.printf("# Free heap: %u B\n", ESP.getFreeHeap());
+  Serial.println("# Commands: L:<label> start recording | L: stop | B benchmark");
+  Serial.println("#");
 }
 
 void loop() {
@@ -195,7 +226,23 @@ void loop() {
 
   float score;
   int c = classify(uvFiltered, irFiltered, &score);
+  const char *pred = className(c);
 
-  Serial.printf("%d,%d,%.2f,%.2f,%s,%s,%.3f\n", rawUV, rawIR, uvFiltered, irFiltered,
-                currentLabel.c_str(), className(c), score);
+  bool recording = currentLabel.length() > 0;
+  const char *label = recording ? currentLabel.c_str() : "-";
+  const char *verdict = "";
+  if (recording) {
+    recRows++;
+    bool ok = currentLabel.equalsIgnoreCase(pred);
+    if (ok) recMatches++;
+    verdict = ok ? "  <- correct" : "  <- WRONG";
+  }
+
+  Serial.printf("UV raw %4d  filt %8.2f | IR raw %5d  filt %9.2f | label: %-11s | detected: %-11s conf %5.1f%%%s\n",
+                rawUV, uvFiltered, rawIR, irFiltered, label, pred, score * 100, verdict);
+
+  if (recording && recRows % 25 == 0) {
+    Serial.printf("# Recording \"%s\": %lu rows so far, model agreed on %lu (%.0f%%)\n",
+                  currentLabel.c_str(), recRows, recMatches, 100.0f * recMatches / recRows);
+  }
 }
